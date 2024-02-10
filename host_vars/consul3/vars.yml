@@ -1,0 +1,4 @@
+consul_name: consul3
+retry_join_consul: ["consul1","consul2"]
+consul_ip: 192.168.56.203
+hostname: consul3.otus.test

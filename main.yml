@@ -1,0 +1,32 @@
+---
+- name: install consul
+  hosts: consul_servers
+  become: true
+  tags:
+    - consul
+  roles:
+    - consul
+
+- name: install nginx_app
+  hosts: nginx_servers
+  become: true
+  tags:
+    - nginx
+  roles:
+    - php-fpm_mysql
+
+- name: install wp
+  hosts: wp_servers
+  become: true
+  tags:
+    - wp
+  roles:
+    - wordpress
+- name: install haproxy
+  hosts: haproxy
+  become: true
+  tags:
+    - haproxy
+  roles:
+    - haproxy
+...

@@ -1,0 +1,271 @@
+- name: update
+  yum: update_cache=yes   
+- name: repo nginx
+  copy:
+    content: |
+      [nginx]
+      name=nginx repo
+      baseurl=https://nginx.org/packages/mainline/centos/7/\$basearch/
+      gpgcheck=1
+      enabled=1
+      gpgkey=https://nginx.org/keys/nginx_signing.key
+    dest: /etc/yum.repos.d/yandex.repo
+    mode: 0644
+
+- name: Install components for building
+  yum:
+    name: "{{ packages }}"
+    state: present
+  vars:
+    packages:
+      - nginx
+      - php
+      - php-fpm
+      - php-mysql
+      - php-mysqli
+      - mariadb-server
+
+- name: Copy nginx.conf
+  copy:
+    src: nginx_php.conf
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: 0644
+- name: Copy www php-fpm
+  copy:
+    src: www.conf
+    dest: /etc/php-fpm.d/www.conf
+    owner: root
+    group: root
+    mode: 0644    
+- name: Copy db_connect script
+  copy:
+    src: con_db.php
+    dest: /home/vagrant/con_db.php
+    owner: root
+    group: root
+    mode: 733
+
+- name: Copy index.php
+  copy:
+    content: |
+      <?php phpinfo(); ?>
+    dest: /usr/share/nginx/html/index.php
+    owner: nginx
+    group: nginx
+    mode: 0644  
+
+- name: Enable and start nginx
+  systemd:
+    name: nginx
+    state: started
+    enabled: true
+- name: Enable and start php-fpm
+  systemd:
+    name: php-fpm
+    state: started
+    enabled: true
+- name: run con_db  
+  command: 'sudo php /home/vagrant/con_db.php'
+- name: Enable and start php-fpm
+  systemd:
+    name: php-fpm
+    state: restarted
+- name: start firewall
+  systemd:
+    name: firewalld
+    state: started
+- name: open http port
+  command: "{{ item }}"
+  with_items: 
+    - 'sudo firewall-cmd --permanent --add-port=80/tcp'
+    - 'sudo firewall-cmd --reload'
+- name: stop firewall
+  systemd:
+    name: firewalld
+    state: stopped
+- name: add firewall consul tcp rules
+  copy:
+    content: |
+      <?xml version="1.0" encoding="utf-8"?>
+      <service>      
+      <short>consul</short>
+      <description>Firewall rule for consul port</description>
+      <port protocol="tcp" port="8300"/>
+      <port protocol="tcp" port="8301"/>
+      <port protocol="tcp" port="8302"/>
+      <port protocol="tcp" port="8500"/>
+      <port protocol="tcp" port="8600"/>
+      </service>
+    dest: /etc/firewalld/services/consultcp.xml
+- name: add firewall consul tcp rules
+  copy:
+    content: |
+      <?xml version="1.0" encoding="utf-8"?>
+      <service>      
+      <short>consul</short>
+      <description>Firewall rule for consul port</description>
+      <port protocol="udp" port="8301"/>
+      <port protocol="udp" port="8302"/>
+      <port protocol="udp" port="8600"/>
+      </service>
+    dest: /etc/firewalld/services/consuludp.xml
+- name: restart firewalld
+  systemd:
+    name: firewalld
+    state: restarted
+- name: Configuring firewall services
+  firewalld:
+    service: consuludp
+    permanent: yes
+    state: enabled
+    immediate: yes
+- name: Configuring firewall services
+  firewalld:
+    service: consultcp
+    permanent: yes
+    state: enabled
+    immediate: yes
+- name: set hostname
+  command: hostnamectl set-hostname {{ hostname }}
+- name: sync time
+  command: "{{ item }}"
+  with_items: 
+    - timedatectl set-timezone Europe/Moscow
+    - yum install chrony unzip wget -y
+    - systemctl enable chronyd --now
+- name: download consul
+  shell: wget -P /home/ https://hashicorp-releases.yandexcloud.net/consul/1.17.2/consul_1.17.2_linux_amd64.zip --no-check-certificate
+  ignore_errors: true
+- name: unzip consul
+  unarchive:
+    src: /home/consul_1.17.2_linux_amd64.zip
+    dest: /usr/bin/
+    remote_src: yes
+- name: modify /etc/hosts
+  copy:
+    content: |
+      127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+      ::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+      127.0.1.1 {{ nginx_name }} {{ nginx_name }}
+      192.168.56.201 consul1 {{ hostvars.consul1.hostname }}
+      192.168.56.202 consul2 {{ hostvars.consul2.hostname }}
+      192.168.56.203 consul3 {{ hostvars.consul3.hostname }}
+      192.168.56.204 nginx1 {{ hostvars.nginx1.hostname }}
+      192.168.56.205 nginx2 {{ hostvars.nginx2.hostname }}
+      192.168.56.206 wp1 {{ hostvars.wp1.hostname }}
+      192.168.56.207 wp2 {{ hostvars.wp2.hostname }}
+    dest: /etc/hosts
+- name: create user and dir
+  command: "{{ item }}"
+  with_items: 
+    - useradd -r -c 'Consul DCS service' consul
+    - mkdir -p /var/lib/consul /etc/consul.d
+    - chown consul:consul /var/lib/consul /etc/consul.d
+    - chmod 775 /var/lib/consul /etc/consul.d
+  ignore_errors: true
+- name: config consul
+  copy: 
+    content: |
+      {
+          "bind_addr": "{{ nginx_ip }}",
+          "datacenter": "dc1",
+          "data_dir": "/var/lib/consul",
+          "domain": "consul",
+          "enable_script_checks": true,
+          "dns_config": {
+              "enable_truncate": true,
+              "only_passing": true
+          },
+          "enable_syslog": true,
+          "encrypt": "{{ hostvars.consul1.server_key.stdout }}",
+          "leave_on_terminate": true,
+          "log_level": "DEBUG",
+          "rejoin_after_leave": true,
+          "retry_join": [
+              "consul1.otus.test",
+              "consul2.otus.test",
+              "consul3.otus.test"
+          ],
+          "server": false,
+          "ui_config": {
+              "enabled": true
+          },
+          "ports": {
+              "grpc_tls":8502,
+              "http":8500
+              },
+          "tls": {
+              "defaults": {
+                  "ca_file": "/etc/consul.d/certs/consul-agent-ca.pem",
+                  "cert_file": "/etc/consul.d/certs/dc1-server-consul-0.pem",
+                  "key_file": "/etc/consul.d/certs/dc1-server-consul-0-key.pem",
+                  "verify_incoming": true,
+                  "verify_outgoing": true,
+                  "verify_server_hostname": true
+              },
+          }
+      }     
+    dest: /etc/consul.d/config.json
+- name: config svc
+  copy:
+    content: |
+      {
+          "service": {
+              "id": "web",
+              "name": "web",
+              "tags": [ "web" ],
+              "port": 80,
+              "enable_tag_override": false,
+              "check": {
+                  "id": "web_up",
+                  "name": "web healthcheck",
+                  "tcp": "localhost:80",
+                  "interval": "10s",
+                  "timeout": "2s"
+              }
+          }
+      }
+    dest: /etc/consul.d/web.json
+- name: create cert dir
+  file:
+    path: /etc/consul.d/certs
+    state: directory
+    owner: consul
+    group: consul
+- name: copy keys
+  copy:
+    src: ./certs/consul1/home/vagrant/
+    dest: /etc/consul.d/certs/
+    owner: consul
+    group: consul
+- name: create systemd unit
+  copy:
+    content: |
+      [Unit]
+      Description=Consul Service Discovery Agent
+      Documentation=https://www.consul.io/
+      After=network-online.target
+      Wants=network-online.target
+      
+      [Service]
+      Type=simple
+      User=consul
+      Group=consul
+      ExecStart=/usr/bin/consul agent \
+          -node={{ hostname }} \
+          -config-dir=/etc/consul.d
+      ExecReload=/bin/kill -HUP $MAINPID
+      KillSignal=SIGINT
+      TimeoutStopSec=5
+      Restart=on-failure
+      SyslogIdentifier=consul
+      
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/consul.service
+- name: start consul
+  systemd:
+    name: consul
+    state: started
